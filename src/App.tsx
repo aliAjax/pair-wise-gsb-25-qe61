@@ -1,158 +1,155 @@
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import "./styles.css";
+import { protocolOf } from "./domain/catalog";
+import { reducer, emptyState } from "./domain/store";
+import { activeAppointmentOf } from "./domain/scheduling";
+import { buildBatches } from "./domain/catalog";
+import type { ExamResult } from "./domain/types";
+import { loadState, saveState, clearState, seedState } from "./storage/stationRepository";
+import { RegisterForm } from "./ui/RegisterForm";
+import { TimelineBoard } from "./ui/TimelineBoard";
+import { CaseList } from "./ui/CaseList";
+import { Sidebar } from "./ui/Sidebar";
+import { RedropDialog } from "./ui/RedropDialog";
+import { ExamDialog } from "./ui/ExamDialog";
 
-const project = {
-  "id": "hxwl-11",
-  "port": 5111,
-  "title": "眼科验光记录",
-  "subtitle": "视力、屈光参数与复查处方对比",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#2563eb",
-    "#059669",
-    "#dc2626"
-  ],
-  "domain": "眼视光",
-  "users": [
-    "验光师",
-    "门店顾问",
-    "复查医生"
-  ],
-  "metrics": [
-    "近视进展",
-    "散光变化",
-    "复查提醒",
-    "处方数量"
-  ],
-  "filters": [
-    "儿童",
-    "成人",
-    "渐进片",
-    "角膜塑形镜"
-  ],
-  "fields": [
-    "裸眼视力",
-    "矫正视力",
-    "球镜",
-    "柱镜",
-    "轴位",
-    "瞳距",
-    "角膜曲率"
-  ],
-  "records": [
-    [
-      "Patient-032",
-      "儿童近视",
-      "复查",
-      "右眼-2.75DS，轴位180"
-    ],
-    [
-      "Patient-081",
-      "渐进片",
-      "初配",
-      "ADD +1.50，瞳高待确认"
-    ],
-    [
-      "Patient-144",
-      "散光",
-      "复查",
-      "柱镜变化0.50D"
-    ]
-  ]
-};
-
-const statusColors = ["status-ok", "status-watch", "status-danger"];
-
-function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
-  return (
-    <article className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
-    </article>
-  );
+interface Toast {
+  id: number;
+  kind: "danger" | "ok" | "info";
+  text: string;
 }
 
 function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
-  });
+  const [state, dispatch] = useReducer(reducer, undefined, loadState);
+  const [now, setNow] = useState(() => Date.now());
+  const [selectedId, setSelectedId] = useState<string | undefined>();
+  const [redropId, setRedropId] = useState<string | undefined>();
+  const [examId, setExamId] = useState<string | undefined>();
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const logLenRef = useRef(state.log.length);
+
+  const batches = useMemo(() => buildBatches(now), [now]);
+
+  // 时钟：每 20 秒推进，驱动"当前时段"和窗口状态
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 20_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // 本机留档：状态变更即写入 localStorage
+  useEffect(() => {
+    saveState(state);
+  }, [state]);
+
+  // 监听留档流水，把最新动作反馈到界面
+  useEffect(() => {
+    if (state.log.length > logLenRef.current) {
+      const latest = state.log[0];
+      const kind: Toast["kind"] =
+        latest.kind === "danger" ? "danger" : latest.kind === "void" ? "info" : "ok";
+      const id = Date.now() + Math.random();
+      setToasts((t) => [...t, { id, kind, text: latest.text }]);
+      setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000);
+    }
+    logLenRef.current = state.log.length;
+  }, [state.log]);
+
+  const selected = state.cases.find((c) => c.id === selectedId);
+  const redropCase = state.cases.find((c) => c.id === redropId);
+  const examCase = state.cases.find((c) => c.id === examId);
+  const examAppt = examCase ? activeAppointmentOf(state, examCase.id) : undefined;
 
   return (
     <main className="app-shell">
-      <section className="hero">
+      <header className="topbar">
         <div>
-          <p className="eyebrow">{project.id} · port {project.port}</p>
-          <h1>{project.title}</h1>
-          <p className="subtitle">{project.subtitle}</p>
+          <p className="eyebrow">HXWL-11 · 散瞳排程台</p>
+          <h1>小儿散瞳验光 · 滴药排程看板</h1>
+          <p className="subtitle">
+            登记患者 / 眼别 / 药品批次 / 滴眼时刻 / 眼压；药效窗口内安排检查，同一仪器同一时段仅留一人；
+            危险病例保留输入并列出原因，锁定不释放仪器。
+          </p>
         </div>
-        <div className="stack-card">
-          <span>技术栈</span>
-          <strong>{project.stack}</strong>
-        </div>
-      </section>
+      </header>
 
-      <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
+      <div className="layout">
+        <div className="main-col">
+          <RegisterForm
+            now={now}
+            onSubmit={(input) =>
+              dispatch({
+                type: "register",
+                now: Date.now(),
+                protocol: protocolOf(input.drugId),
+                batches,
+                input,
+              })
+            }
+          />
+          <TimelineBoard state={state} now={now} selectedCaseId={selectedId} onSelect={setSelectedId} />
+          <CaseList
+            state={state}
+            now={now}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onRedrop={setRedropId}
+            onExam={setExamId}
+            onRetry={(caseId) => dispatch({ type: "retry", caseId, now: Date.now() })}
+          />
+        </div>
+        <Sidebar
+          state={state}
+          now={now}
+          onLoadSeed={() => {
+            const s = seedState(Date.now());
+            dispatch({ type: "hydrate", state: s });
+          }}
+          onClear={() => {
+            if (window.confirm("确定清空本机全部留档？")) {
+              clearState();
+              dispatch({ type: "hydrate", state: emptyState() });
+            }
+          }}
+        />
+      </div>
+
+      {redropCase && (
+        <RedropDialog
+          c={redropCase}
+          now={now}
+          onClose={() => setRedropId(undefined)}
+          onConfirm={(drop) => {
+            dispatch({
+              type: "redrop",
+              caseId: redropCase.id,
+              now: Date.now(),
+              protocol: protocolOf(redropCase.drugId),
+              batches,
+              drop,
+            });
+            setRedropId(undefined);
+          }}
+        />
+      )}
+
+      {examCase && examAppt && (
+        <ExamDialog
+          c={examCase}
+          appt={examAppt}
+          now={now}
+          onClose={() => setExamId(undefined)}
+          onConfirm={(result: Omit<ExamResult, "caseId">) => {
+            dispatch({ type: "recordExam", caseId: examCase.id, result });
+            setExamId(undefined);
+          }}
+        />
+      )}
+
+      <div className="toast-stack">
+        {toasts.map((t) => (
+          <div key={t.id} className={`toast toast-${t.kind}`}>{t.text}</div>
         ))}
-      </section>
-
-      <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
-            ))}
-          </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      </div>
     </main>
   );
 }
